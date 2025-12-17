@@ -52,17 +52,13 @@ SetupHelper.SetupTransports(); // From DiscUtils.Transports
 
 ##### AOT-Compatible Registration
 
-For Native AOT compatibility, use the generated registration methods:
+For Native AOT compatibility, use the source-generated registration method:
 
 ```csharp
-// Register core types
-DiscUtils_Core_GeneratedRegistration.Register();
-
-// Register specific libraries you need
-DiscUtils.Setup.NtfsRegistration.Register();
-DiscUtils.Setup.VdiRegistration.Register();
-// etc.
+SetupHelper.SetupCompleteAot(); // From DiscUtils.Complete - AOT compatible
 ```
+
+This method calls all the source-generated registration methods from each assembly, providing AOT-compatible registration without reflection.
 
 See [AOT_SUPPORT.md](AOT_SUPPORT.md) for detailed information about Native AOT support.
 

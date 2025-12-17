@@ -4,6 +4,7 @@
     <Description>DiscUtils NTFS filesystem parser</Description>
     <Authors>Kenneth Bell;LordMike;Olof Lagerkvist</Authors>
     <PackageTags>DiscUtils;Filesystem;NTFS</PackageTags>
+    <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
   </PropertyGroup>
 
   <ItemGroup>

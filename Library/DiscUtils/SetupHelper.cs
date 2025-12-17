@@ -1,13 +1,4 @@
-﻿using DiscUtils.Btrfs;
-using DiscUtils.BootConfig;
-using DiscUtils.Dmg;
-using DiscUtils.ExFat;
-using DiscUtils.Ext;
-using DiscUtils.Fat;
-using DiscUtils.HfsPlus;
-using DiscUtils.Iso9660;
-using DiscUtils.Nfs;
-using DiscUtils.Ntfs;
+﻿using DiscUtils.BootConfig;
 using DiscUtils.OpticalDisk;
 using DiscUtils.Registry;
 using DiscUtils.Sdi;
@@ -15,7 +6,16 @@ using DiscUtils.SquashFs;
 using DiscUtils.Udf;
 using DiscUtils.Wim;
 using DiscUtils.Xfs;
+using DiscUtils.Iso9660;
+using DiscUtils.ExFat;
+using DiscUtils.HfsPlus;
 using DiscUtils.Net.Dns;
+using DiscUtils.Nfs;
+using DiscUtils.Ntfs;
+using DiscUtils.Iscsi;
+using DiscUtils.Btrfs;
+using DiscUtils.Ext;
+using DiscUtils.Fat;
 using DiscUtils.OpticalDiscSharing;
 
 namespace DiscUtils.Complete;
@@ -64,48 +64,39 @@ public static class SetupHelper
     /// </summary>
     public static void SetupCompleteAot()
     {
-        // Register all assemblies using generated registration methods
+        // Register Core (includes RAW disk format and core transports)
         Setup.DiscUtils_Core_GeneratedRegistration.Register();
         
-        // File systems
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Btrfs_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Ext_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Fat_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_ExFat_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_HfsPlus_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Ntfs_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_SquashFs_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Swap_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Xfs_GeneratedRegistration");
+        // Register all other assemblies using their generated registration methods
+        Setup.DiscUtils_Btrfs_GeneratedRegistration.Register();
+        Setup.DiscUtils_Ext_GeneratedRegistration.Register();
+        Setup.DiscUtils_Fat_GeneratedRegistration.Register();
+        Setup.DiscUtils_ExFat_GeneratedRegistration.Register();
+        Setup.DiscUtils_HfsPlus_GeneratedRegistration.Register();
+        Setup.DiscUtils_Ntfs_GeneratedRegistration.Register();
+        Setup.DiscUtils_SquashFs_GeneratedRegistration.Register();
+        Setup.DiscUtils_Swap_GeneratedRegistration.Register();
+        Setup.DiscUtils_Xfs_GeneratedRegistration.Register();
+        Setup.DiscUtils_Vdi_GeneratedRegistration.Register();
+        Setup.DiscUtils_Vhd_GeneratedRegistration.Register();
+        Setup.DiscUtils_Vhdx_GeneratedRegistration.Register();
+        Setup.DiscUtils_Vmdk_GeneratedRegistration.Register();
+        Setup.DiscUtils_Dmg_GeneratedRegistration.Register();
+        Setup.DiscUtils_Xva_GeneratedRegistration.Register();
+        Setup.DiscUtils_Lvm_GeneratedRegistration.Register();
+        Setup.DiscUtils_VirtualFileSystem_GeneratedRegistration.Register();
+        Setup.DiscUtils_Iscsi_GeneratedRegistration.Register();
         
-        // Virtual disk formats
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Vdi_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Vhd_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Vhdx_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Vmdk_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Dmg_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Wim_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Xva_GeneratedRegistration");
-        
-        // Optical formats
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Iso9660_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_OpticalDisk_GeneratedRegistration");
-        
-        // Volume managers
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Lvm_GeneratedRegistration");
-        
-        // Other
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_VirtualFileSystem_GeneratedRegistration");
-        RegisterIfExists("DiscUtils.Setup.DiscUtils_Iscsi_GeneratedRegistration");
-    }
-
-    private static void RegisterIfExists(string typeName)
-    {
-        var type = Type.GetType(typeName);
-        if (type != null)
-        {
-            var method = type.GetMethod("Register", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-            method?.Invoke(null, null);
-        }
+        // TODO: Uncomment these once their assemblies are built and registration is generated
+        // Setup.DiscUtils_Iso9660_GeneratedRegistration.Register();
+        // Setup.DiscUtils_Udf_GeneratedRegistration.Register();
+        // Setup.DiscUtils_OpticalDisk_GeneratedRegistration.Register();
+        // Setup.DiscUtils_Wim_GeneratedRegistration.Register();
+        // Setup.DiscUtils_Net_GeneratedRegistration.Register();
+        // Setup.DiscUtils_Nfs_GeneratedRegistration.Register();
+        // Setup.DiscUtils_OpticalDiscSharing_GeneratedRegistration.Register();
+        // Setup.DiscUtils_BootConfig_GeneratedRegistration.Register();
+        // Setup.DiscUtils_Registry_GeneratedRegistration.Register();
+        // Setup.DiscUtils_Sdi_GeneratedRegistration.Register();
     }
 }

@@ -130,15 +130,10 @@ SetupHelper.SetupComplete();
 
 ### After (AOT-compatible):
 ```csharp
-using DiscUtils.Setup;
+using DiscUtils.Complete;
 
-// Register Core
-DiscUtils_Core_GeneratedRegistration.Register();
-
-// Register only what you need
-NtfsRegistration.Register();
-VdiRegistration.Register();
-// etc.
+// Single call to register everything using source generation
+SetupHelper.SetupCompleteAot();
 ```
 
 ## Build Configuration
