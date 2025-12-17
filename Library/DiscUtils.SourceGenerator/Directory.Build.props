@@ -1,0 +1,6 @@
+<Project>
+  <!-- Override parent Directory.Build.props for source generator -->
+  <PropertyGroup>
+    <LangVersion>Preview</LangVersion>
+  </PropertyGroup>
+</Project>

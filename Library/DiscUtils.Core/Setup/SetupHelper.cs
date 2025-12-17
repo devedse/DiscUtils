@@ -39,6 +39,25 @@ public static class SetupHelper
     }
 
     /// <summary>
+    /// Registers types from an assembly using a generated registration delegate.
+    /// This method is AOT-compatible and should be used instead of RegisterAssembly when using Native AOT.
+    /// </summary>
+    /// <param name="assemblyName">The name of the assembly being registered (for tracking)</param>
+    /// <param name="registrationAction">The generated registration action from source generator</param>
+    public static void RegisterAssemblyAot(string assemblyName, Action registrationAction)
+    {
+        lock (_alreadyLoaded)
+        {
+            if (!_alreadyLoaded.Add(assemblyName))
+            {
+                return;
+            }
+
+            registrationAction();
+        }
+    }
+
+    /// <summary>
     /// Allows intercepting any file open operation
     /// </summary>
     /// <remarks>

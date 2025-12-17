@@ -116,6 +116,15 @@ public sealed class VolumeManager
     }
 
     /// <summary>
+    /// Register a LogicalVolumeFactory instance
+    /// </summary>
+    /// <param name="factory">The factory to register</param>
+    internal static void RegisterLogicalVolumeFactory(LogicalVolumeFactory factory)
+    {
+        LogicalVolumeFactories.Add(factory);
+    }
+
+    /// <summary>
     /// Register new LogicalVolumeFactories detected in an assembly
     /// </summary>
     /// <param name="assembly">The assembly to inspect</param>
