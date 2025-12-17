@@ -56,7 +56,7 @@ var fs = new NtfsFileSystem(stream);
 
 ### For AOT Applications (New Approach)
 
-#### Option 1: Use Generated Registration Methods (Recommended)
+#### Option 1: Use Manual Registration Methods (Recommended)
 
 ```csharp
 using DiscUtils.Setup;
@@ -65,23 +65,51 @@ using DiscUtils.Setup;
 DiscUtils_Core_GeneratedRegistration.Register();
 
 // Register specific file systems you need
-DiscUtils.Setup.NtfsRegistration.Register();  // For NTFS
+NtfsRegistration.Register();  // For NTFS
+FatRegistration.Register();   // For FAT
 // ... register other types as needed
+
+// Register virtual disk formats
+VdiRegistration.Register();   // For VDI
+VhdRegistration.Register();   // For VHD
+// ... register other formats as needed
 
 // Now use DiscUtils normally
 var fs = new NtfsFileSystem(stream);
 ```
 
-#### Option 2: Manual Registration
+#### Option 2: Direct Manual Registration
 
 ```csharp
 using DiscUtils;
 
 // Manually register factories you need
 FileSystemManager.RegisterFileSystems(new DiscUtils.Ntfs.FileSystemFactory());
-VirtualDiskManager.TypeMap.Add("VDI", new DiscUtils.Vdi.DiskFactory());
+
+var vdiFactory = new DiscUtils.Vdi.DiskFactory();
+VirtualDiskManager.TypeMap.Add("VDI", vdiFactory);
+VirtualDiskManager.ExtensionMap.Add("vdi", vdiFactory);
 // ... etc.
 ```
+
+## Available Registration Methods
+
+Each DiscUtils library that provides factories includes a `{LibraryName}Registration.Register()` method:
+
+- **File Systems:**
+  - `NtfsRegistration.Register()` - NTFS support
+  - `FatRegistration.Register()` - FAT12/16/32 support
+  - And more...
+
+- **Virtual Disks:**
+  - `VdiRegistration.Register()` - VirtualBox VDI format
+  - `VhdRegistration.Register()` - Microsoft VHD format
+  - And more...
+
+- **Core:**
+  - `DiscUtils_Core_GeneratedRegistration.Register()` - RAW disk format and core features
+
+Refer to each library's Setup namespace for available registration methods.
 
 ## Limitations
 
@@ -102,10 +130,14 @@ SetupHelper.SetupComplete();
 
 ### After (AOT-compatible):
 ```csharp
-// Register only what you need
+using DiscUtils.Setup;
+
+// Register Core
 DiscUtils_Core_GeneratedRegistration.Register();
-DiscUtils.Setup.NtfsRegistration.Register();
-DiscUtils.Setup.VdiRegistration.Register();
+
+// Register only what you need
+NtfsRegistration.Register();
+VdiRegistration.Register();
 // etc.
 ```
 
