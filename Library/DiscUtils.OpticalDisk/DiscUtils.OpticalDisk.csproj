@@ -9,6 +9,7 @@
     <ProjectReference Include="..\DiscUtils.Core\DiscUtils.Core.csproj" />
     <ProjectReference Include="..\DiscUtils.Iso9660\DiscUtils.Iso9660.csproj" />
     <ProjectReference Include="..\DiscUtils.Udf\DiscUtils.Udf.csproj" />
+    <ProjectReference Include="..\DiscUtils.SourceGenerator\DiscUtils.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

@@ -13,6 +13,7 @@
   <ItemGroup>
     <ProjectReference Include="..\DiscUtils.Core\DiscUtils.Core.csproj" />
     <ProjectReference Include="..\DiscUtils.Streams\DiscUtils.Streams.csproj" />
+    <ProjectReference Include="..\DiscUtils.SourceGenerator\DiscUtils.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

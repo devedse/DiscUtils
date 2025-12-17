@@ -8,6 +8,7 @@
   
   <ItemGroup>
     <ProjectReference Include="..\DiscUtils.Core\DiscUtils.Core.csproj" />
+    <ProjectReference Include="..\DiscUtils.SourceGenerator\DiscUtils.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
 
     <!-- In order to test FileName and other internals in Unit tests-->
     <InternalsVisibleTo Include="LibraryTests" />
