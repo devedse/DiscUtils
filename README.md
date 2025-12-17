@@ -33,7 +33,11 @@ To work with this, four Meta packages have been created:
 
 #### Note on detections
 
-DiscUtils has a number of detection helpers. These provide services like "which filesystem is this stream?". For this to work, you must register your filesystem providers with the DiscUtils core. To do this, call:
+DiscUtils has a number of detection helpers. These provide services like "which filesystem is this stream?". For this to work, you must register your filesystem providers with the DiscUtils core.
+
+##### Standard (Reflection-based) Registration
+
+To do this with reflection (not compatible with Native AOT), call:
 
     DiscUtils.Setup.RegisterAssembly(assembly);
 
@@ -45,6 +49,22 @@ SetupHelper.SetupContainers(); // From DiscUtils.Containers
 SetupHelper.SetupFileSystems(); // From DiscUtils.FileSystems
 SetupHelper.SetupTransports(); // From DiscUtils.Transports
 ```
+
+##### AOT-Compatible Registration
+
+For Native AOT compatibility, use the generated registration methods:
+
+```csharp
+// Register core types
+DiscUtils_Core_GeneratedRegistration.Register();
+
+// Register specific libraries you need
+DiscUtils.Setup.NtfsRegistration.Register();
+DiscUtils.Setup.VdiRegistration.Register();
+// etc.
+```
+
+See [AOT_SUPPORT.md](AOT_SUPPORT.md) for detailed information about Native AOT support.
 
 ## How to use the Library
 
