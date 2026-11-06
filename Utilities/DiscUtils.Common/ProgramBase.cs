@@ -28,6 +28,7 @@ using System.Reflection;
 using DiscUtils.Streams;
 using System.Linq;
 using LTRData.Extensions.Buffers;
+using LTRData.Extensions.Formatting;
 
 namespace DiscUtils.Common;
 
@@ -243,12 +244,16 @@ public abstract class ProgramBase
         {
             Console.ForegroundColor = ConsoleColor.Red;
 
-            while (ex is not null)
+#if DEBUG
+            Console.Error.WriteLine(ex.ToString());
+#else
+            foreach (var e in ex.Enumerate())
             {
-                Environment.ExitCode = ex.HResult;
-                Console.Error.WriteLine(ex.Message);
-                ex = ex.InnerException;
+                Environment.ExitCode = e.HResult;
+
+                Console.Error.WriteLine(e.Message);
             }
+#endif
 
             Console.ResetColor();
         }
@@ -262,7 +267,7 @@ public abstract class ProgramBase
     protected virtual void DisplayHeader()
     {
         Console.WriteLine($"{ExeName} v{Version}, available from https://github.com/LTRData/DiscUtils");
-        Console.WriteLine("Copyright (c) Kenneth Bell, Olof Lagerkvist and contributors, 2008-2025");
+        Console.WriteLine("Copyright (c) Kenneth Bell, Olof Lagerkvist and contributors, 2008-2026");
         Console.WriteLine("Free software issued under the MIT License, see LICENSE.TXT for details.");
         Console.WriteLine();
     }

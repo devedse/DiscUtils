@@ -13,13 +13,12 @@
     <Company>LTR Data</Company>
     <Authors>Kenneth Bell;LordMike;Olof Lagerkvist</Authors>
     <OutputPath>..\$(Configuration)</OutputPath>
-    <FileVersion>1.0.107</FileVersion>
-    <Version>1.0.107</Version>
+    <FileVersion>1.0.108</FileVersion>
+    <Version>1.0.108</Version>
 
 	<GenerateDocumentationFile>true</GenerateDocumentationFile>
 
     <NoWarn>CS1591;CS0649</NoWarn>
-    <EmitCompilerGeneratedFiles>false</EmitCompilerGeneratedFiles>
     
   </PropertyGroup>
 

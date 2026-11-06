@@ -12,6 +12,10 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
+  <PropertyGroup>
+	<!--<DefineConstants>$(DefineConstants);LONG_RUNNING_TESTS</DefineConstants>-->
+  </PropertyGroup>
+  
   <ItemGroup>
     <None Remove="_Data\*" />
     <EmbeddedResource Include="_Data\*" />
@@ -19,10 +23,15 @@
 
   <ItemGroup>
 	<EmbeddedResource Include="ExFat\Environment\exFAT.vhdx.gz" />
+	<EmbeddedResource Include="SquashFs\extended-inodes.sqsh" />
+	<EmbeddedResource Include="SquashFs\huge-sparse.sqsh" />
+	<EmbeddedResource Include="SquashFs\big-root.sqsh" />
+	<EmbeddedResource Include="SquashFs\xattr-symlink.sqsh" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\Utilities\DiscUtils.Diagnostics\DiscUtils.Diagnostics.csproj" />
+    <ProjectReference Include="..\..\Utilities\ISOCreate\ISOCreate.csproj" />
     <ProjectReference Include="..\..\Library\DiscUtils.Core\DiscUtils.Core.csproj" />
     <ProjectReference Include="..\..\Library\DiscUtils\DiscUtils.csproj" />
   </ItemGroup>
@@ -65,10 +74,10 @@
 
   <ItemGroup Condition="$([MSBuild]::IsTargetFrameworkCompatible('$(TargetFramework)', 'net5.0'))">
     <PackageReference Include="K4os.Compression.LZ4" Version="1.3.*" />
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="*" />
-    <PackageReference Include="xunit.extensibility.core" Version="*" />
-    <PackageReference Include="xunit" Version="*" />
-    <PackageReference Include="xunit.runner.visualstudio" Version="*">
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.*" />
+    <PackageReference Include="xunit.extensibility.core" Version="2.9.*" />
+    <PackageReference Include="xunit" Version="2.9.*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.*">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>

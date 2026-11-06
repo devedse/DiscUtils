@@ -1,0 +1,21 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Windows integration for exposing DiscUtils filesystem implementations through the Dokan filesystem driver.</Description>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <PackageTags>DiscUtils;Windows;Dokan;Mount;Filesystem</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="DokanNet" Version="2.3.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Library\DiscUtils.Core\DiscUtils.Core.csproj" />
+    <ProjectReference Include="..\..\Library\DiscUtils.Streams\DiscUtils.Streams.csproj" />
+    <ProjectReference Include="..\..\Library\DiscUtils.VirtualFileSystem\DiscUtils.VirtualFileSystem.csproj" />
+  </ItemGroup>
+
+</Project>
