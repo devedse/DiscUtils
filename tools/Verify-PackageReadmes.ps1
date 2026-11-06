@@ -13,13 +13,13 @@ if (-not $PackageDirectory) {
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 # Utilities and SourceGenerators are not packable. These two trees share
-# the LTRData.$(MSBuildProjectName) package identity convention.
+# the Devedse.$(MSBuildProjectName) package identity convention (LTRData.* upstream).
 $expected = @{}
 foreach ($tree in @('Library', 'Integrations')) {
     $projects = Get-ChildItem -Path (Join-Path $RepositoryRoot "$tree/*/*.csproj") -File
     foreach ($project in $projects) {
         [xml] $projectXml = Get-Content -LiteralPath $project.FullName -Raw
-        $id = 'LTRData.' + $project.BaseName
+        $id = 'Devedse.' + $project.BaseName
         $readmePath = Join-Path $project.DirectoryName 'README.md'
         if (-not (Test-Path -LiteralPath $readmePath -PathType Leaf)) {
             throw "Missing local README: $readmePath"
