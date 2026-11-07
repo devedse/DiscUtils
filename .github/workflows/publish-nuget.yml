@@ -10,6 +10,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # lets NuGet/login trade the GitHub OIDC token for a temporary NuGet API key
 
     steps:
     - uses: actions/checkout@v5
@@ -24,6 +27,14 @@ jobs:
     - name: Pack
       run: dotnet pack -c Release -o ${{ github.workspace }}/build --no-build
 
-    - name: NuGet push 
-      run: dotnet nuget push *.nupkg --skip-duplicate -k ${{secrets.NUGET_KEY}} -s https://api.nuget.org/v3/index.json
+    # Trusted Publishing: nuget.org has a policy for devedse/DiscUtils + publish-nuget.yml and hands out a key
+    # that is valid for 1 hour. nuget.org no longer offers long-lived API keys (30 days max since Aug 2026).
+    - name: NuGet login (OIDC to temporary API key)
+      uses: NuGet/login@v1
+      id: login
+      with:
+        user: Devedse # nuget.org profile name, not the e-mail address
+
+    - name: NuGet push
+      run: dotnet nuget push *.nupkg --skip-duplicate -k ${{ steps.login.outputs.NUGET_API_KEY }} -s https://api.nuget.org/v3/index.json
       working-directory: ${{ github.workspace }}/build
