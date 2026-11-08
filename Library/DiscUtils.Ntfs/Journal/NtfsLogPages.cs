@@ -23,6 +23,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using static DiscUtils.Ntfs.Journal.JournalUtilities;
 
 namespace DiscUtils.Ntfs.Journal;
@@ -74,6 +75,7 @@ internal sealed class NtfsLogPages
     private readonly Dictionary<long, byte[]> _rawClusters = [];
     private readonly Dictionary<long, byte[]> _rawOriginal = [];
     private readonly Dictionary<long, PageKind> _clusterUse = [];
+    private readonly Dictionary<long, uint> _undoOwners = [];
 
     public NtfsLogPages(Stream volume, JournalVolumeLayout layout)
     {
@@ -86,13 +88,16 @@ internal sealed class NtfsLogPages
     /// <summary>File records, index buffers and plain clusters whose bytes the replay changes (set by <see cref="Commit"/>).</summary>
     public int ChangedPageCount { get; private set; }
 
+    public int UndoTransactionCount => _undoOwners.Values.Distinct().Count();
+
     /// <summary>
     /// Gets a file record or index buffer of <paramref name="length"/> bytes that starts <paramref name="start"/>
     /// bytes into the clusters <paramref name="lcns"/>.
     /// </summary>
-    public LogicalPage GetLogical(PageKind kind, long[] lcns, int start, int length)
+    public LogicalPage GetLogical(PageKind kind, long[] lcns, int start, int length, uint undoTransaction)
     {
         var (spanLcns, startInFirst) = Span(lcns, start, length);
+        Claim(spanLcns, kind, undoTransaction);
         var key = (spanLcns[0] * ClusterSize) + startInFirst;
         if (_logical.TryGetValue(key, out var page))
         {
@@ -101,10 +106,14 @@ internal sealed class NtfsLogPages
                 throw new JournalException($"The log uses the bytes at {key:X} both as {page.Kind} and as {kind}");
             }
 
+            if (!page.Lcns.AsSpan().SequenceEqual(spanLcns))
+            {
+                throw new JournalException($"The log gives conflicting cluster mappings for the page at {key:X}");
+            }
+
             return page;
         }
 
-        Claim(spanLcns, kind);
         var data = new byte[length];
         ReadSpan(spanLcns, startInFirst, data, 0, length);
         var expected = kind == PageKind.FileRecord ? SignatureFile : SignatureIndx;
@@ -123,11 +132,13 @@ internal sealed class NtfsLogPages
     /// <summary>
     /// Reads bytes of a non-resident attribute page that has no update sequence array (bitmaps, plain data).
     /// </summary>
-    public void ReadRaw(long[] lcns, int start, byte[] buffer, int offset, int length)
+    public byte[] ReadRaw(long[] lcns, int start, int length, uint undoTransaction)
     {
         var (spanLcns, startInFirst) = Span(lcns, start, length);
-        Claim(spanLcns, PageKind.Raw);
-        ReadSpan(spanLcns, startInFirst, buffer, offset, length);
+        Claim(spanLcns, PageKind.Raw, undoTransaction);
+        var buffer = new byte[length];
+        ReadSpan(spanLcns, startInFirst, buffer, 0, length);
+        return buffer;
     }
 
     public void WriteRaw(long[] lcns, int start, byte[] buffer, int offset, int length)
@@ -171,14 +182,19 @@ internal sealed class NtfsLogPages
                 continue;
             }
 
-            changed++;
-
             var bytes = (byte[])page.Data.Clone();
+            var replaced = new byte[bytes.Length];
+            ReadSpan(page.Lcns, page.StartInFirstCluster, replaced, 0, replaced.Length);
             if (page.Valid)
             {
-                ApplyFixups(bytes, 0, bytes.Length);
+                ApplyFixups(bytes, 0, bytes.Length, replaced);
+            }
+            else if (bytes.AsSpan().SequenceEqual(replaced))
+            {
+                continue;
             }
 
+            changed++;
             var position = page.StartInFirstCluster;
             var offset = 0;
             foreach (var lcn in page.Lcns)
@@ -209,14 +225,20 @@ internal sealed class NtfsLogPages
     {
         // The callers checked that the range lies within the clusters (and that its first one was not freed).
         var firstIndex = start / ClusterSize;
-        var lastIndex = (start + length - 1) / ClusterSize;
+        var lastIndex = (int)((start + (long)length - 1) / ClusterSize);
         var span = new long[lastIndex - firstIndex + 1];
+        var seen = span.Length > 1 ? new HashSet<long>() : null;
         for (var i = 0; i < span.Length; i++)
         {
             var lcn = lcns[firstIndex + i];
-            if (lcn <= 0 || lcn >= _layout.TotalClusters)
+            if (!_layout.ContainsClusters(lcn, 1))
             {
                 throw new JournalException($"The log names cluster {lcn}, which is not on the volume");
+            }
+
+            if (seen != null && !seen.Add(lcn))
+            {
+                throw new JournalException($"The log maps more than one part of a page to cluster {lcn}");
             }
 
             span[i] = lcn;
@@ -225,7 +247,7 @@ internal sealed class NtfsLogPages
         return (span, start % ClusterSize);
     }
 
-    private void Claim(long[] lcns, PageKind kind)
+    private void Claim(long[] lcns, PageKind kind, uint undoTransaction = 0)
     {
         foreach (var lcn in lcns)
         {
@@ -235,6 +257,15 @@ internal sealed class NtfsLogPages
             }
 
             _clusterUse[lcn] = kind;
+            if (undoTransaction != 0)
+            {
+                if (_undoOwners.TryGetValue(lcn, out var owner) && owner != undoTransaction)
+                {
+                    throw new JournalException($"Undo for transactions {owner:X} and {undoTransaction:X} overlaps cluster {lcn}");
+                }
+
+                _undoOwners[lcn] = undoTransaction;
+            }
         }
     }
 

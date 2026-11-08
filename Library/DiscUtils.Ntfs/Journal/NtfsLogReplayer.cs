@@ -34,25 +34,20 @@ namespace DiscUtils.Ntfs.Journal;
 /// Redo repeats history: every change after a page's oldest dirty LSN is applied again when the page (file
 /// record or index buffer) carries an older LSN than the record; pages without an LSN (bitmaps, plain data) are
 /// replayed unconditionally, which is safe because those operations set bytes and bits to fixed values. Undo then
-/// rolls back the transactions that were still running, newest change first, following the undo-next chain.
-/// Windows writes a compensation record for every undone change and stamps the page with its LSN; this replay
-/// writes no log records, so it stamps undone pages with an LSN just past the end of the log instead. That keeps
-/// a second replay (after an interruption) from undoing a change twice, and it is below every LSN Windows will
-/// hand out after the log is reset.
+/// follows each active transaction's undo-next chain backwards. Undo of different transactions is supported
+/// only for disjoint clusters. We do not write compensation records or persist changes that require undo.
 /// </remarks>
 internal sealed class NtfsLogReplayer
 {
     private readonly NtfsLogAnalysis _analysis;
     private readonly JournalVolumeLayout _layout;
     private readonly NtfsLogPages _pages;
-    private readonly ulong _undoStamp;
 
     public NtfsLogReplayer(Stream volume, JournalVolumeLayout layout, NtfsLogAnalysis analysis)
     {
         _analysis = analysis;
         _layout = layout;
         _pages = new NtfsLogPages(volume, layout);
-        _undoStamp = analysis.LastLsn + 1;
     }
 
     public NtfsLogPages Pages => _pages;
@@ -63,34 +58,41 @@ internal sealed class NtfsLogReplayer
     /// <summary>Log records whose undo action changed a page.</summary>
     public int UndoneRecords { get; private set; }
 
-    public int UndoneTransactions { get; private set; }
+    public int UndoneTransactions => _pages.UndoTransactionCount;
 
     /// <summary>The MFT record numbers that changed (as far as the log tells, for reporting).</summary>
     public SortedSet<long> ChangedFileRecords { get; } = [];
 
     public void Redo()
     {
-        if (_analysis.DirtyPages.Count == 0 || _analysis.RedoLsn == 0)
+        if (_analysis.RedoLsn == 0)
         {
             return;
         }
 
+        var foundStart = false;
         foreach (var lfs in _analysis.Log.ReadForward(_analysis.RedoLsn))
         {
-            if (lfs.RecordType != LfsRecord.TypeClientRecord)
+            foundStart = true;
+            if (!_analysis.Log.IsForNtfsClient(lfs) || lfs.RecordType != LfsRecord.TypeClientRecord)
             {
                 continue;
             }
 
             var record = NtfsLogRecord.TryParse(lfs, out var error) ?? throw new JournalException(error);
-            if (record.Lcns.Length == 0)
+            var target = NtfsLogOperations.TargetOf(record.RedoOperation);
+            if (target == NtfsLogTarget.None)
             {
                 continue;
             }
 
-            var target = NtfsLogOperations.TargetOf(record.RedoOperation);
-            if (target == NtfsLogTarget.None)
+            if (record.Lcns.Length == 0)
             {
+                if (record.UndoOperation == NtfsLogOperation.CompensationLogRecord)
+                {
+                    throw new JournalException($"Compensation record {record.Lsn:X} changes metadata without a cluster mapping");
+                }
+
                 continue;
             }
 
@@ -109,35 +111,49 @@ internal sealed class NtfsLogReplayer
                 RedoneRecords++;
             }
         }
+
+        if (!foundStart && _analysis.DirtyPages.Count != 0)
+        {
+            throw new JournalException($"The redo start record {_analysis.RedoLsn:X} is not in the log");
+        }
     }
 
     public void Undo()
     {
         foreach (var loser in _analysis.Losers)
         {
-            // Counted only if it changed pages: the checkpoint's table dumps also leave an "open" transaction.
-            var changesPages = false;
             var lsn = loser.Value.UndoNextLsn;
-            var seen = new HashSet<ulong>();
             while (lsn != 0)
             {
-                if (!seen.Add(lsn))
-                {
-                    throw new JournalException($"The undo chain of transaction {loser.Key:X} loops at {lsn:X}");
-                }
-
                 var lfs = _analysis.Log.ReadRecord(lsn)
                           ?? throw new JournalException($"Record {lsn:X} to undo is not in the log");
-                var record = NtfsLogRecord.TryParse(lfs, out var error) ?? throw new JournalException(error);
+                _analysis.Log.RequireNtfsRecord(lfs, "undo chain record", LfsRecord.TypeClientRecord);
+
                 if (lfs.TransactionId != loser.Key)
                 {
                     throw new JournalException($"Record {lsn:X} in the undo chain of transaction {loser.Key:X} belongs to {lfs.TransactionId:X}");
                 }
 
-                var target = NtfsLogOperations.TargetOf(record.UndoOperation);
-                if (target != NtfsLogTarget.None && record.Lcns.Length > 0)
+                if (lsn < loser.Value.FirstLsn || lsn > loser.Value.PreviousLsn || lsn > _analysis.LastLsn)
                 {
-                    changesPages = true;
+                    throw new JournalException($"Record {lsn:X} is outside the undo history of transaction {loser.Key:X}");
+                }
+
+                var next = lfs.ClientUndoNextLsn;
+                if (next != 0 && next >= lsn)
+                {
+                    throw new JournalException($"The undo chain of transaction {loser.Key:X} loops or points forward at {lsn:X}");
+                }
+
+                var record = NtfsLogRecord.TryParse(lfs, out var error) ?? throw new JournalException(error);
+                var target = NtfsLogOperations.TargetOf(record.UndoOperation);
+                if (target != NtfsLogTarget.None)
+                {
+                    if (record.Lcns.Length == 0)
+                    {
+                        throw new JournalException($"Record {lsn:X} needs metadata undo without a cluster mapping");
+                    }
+
                     var lcns = (long[])record.Lcns.Clone();
 
                     // A cluster the dirty page table says was freed holds nothing of this page any more.
@@ -146,9 +162,14 @@ internal sealed class NtfsLogReplayer
                     {
                         for (var i = 0; i < lcns.Length && record.TargetVcn - page.Vcn + i < page.Lcns.Length; i++)
                         {
-                            if (page.Lcns[record.TargetVcn - page.Vcn + i] == 0)
+                            var current = page.Lcns[record.TargetVcn - page.Vcn + i];
+                            if (current == 0)
                             {
                                 lcns[i] = 0;
+                            }
+                            else if (current != lcns[i])
+                            {
+                                throw new JournalException($"Record {lsn:X} has a remapped cluster in its undo target");
                             }
                         }
                     }
@@ -160,12 +181,7 @@ internal sealed class NtfsLogReplayer
                 }
 
                 // A compensation record points past the changes that were already undone.
-                lsn = lfs.ClientUndoNextLsn;
-            }
-
-            if (changesPages)
-            {
-                UndoneTransactions++;
+                lsn = next;
             }
         }
     }
@@ -177,22 +193,29 @@ internal sealed class NtfsLogReplayer
     {
         var target = NtfsLogOperations.TargetOf(op);
         var start = record.ClusterBlockOffset * 512;
+        var undoTransaction = redo ? 0 : record.Lfs.TransactionId;
         switch (target)
         {
             case NtfsLogTarget.FileRecord:
             {
+                if (record.TargetVcn < 0 || record.TargetVcn > (long.MaxValue - start) / _layout.BytesPerCluster)
+                {
+                    throw new JournalException($"Log record {record.Lsn:X} has an invalid file record VCN");
+                }
+
                 var length = _layout.MftRecordSize;
                 if (!Allocated(lcns, start, length))
                 {
                     return false;
                 }
 
-                var page = _pages.GetLogical(PageKind.FileRecord, lcns, start, length);
-                if (!PageNeedsAction(page, record, op, redo))
+                var page = _pages.GetLogical(PageKind.FileRecord, lcns, start, length, undoTransaction);
+                if (!PageNeedsAction(page, record, redo))
                 {
                     return false;
                 }
 
+                var torn = !page.Valid && page.Signature == SignatureFile;
                 if (!page.Valid)
                 {
                     // A record that was never written can be rebuilt (InitializeFileRecordSegment) or freed again
@@ -208,8 +231,19 @@ internal sealed class NtfsLogReplayer
                     }
                 }
 
+                var lsn = redo ? record.Lsn : page.Lsn;
                 NtfsLogActions.ApplyToFileRecord(op, record, page.Data, data);
-                Finish(page, record, redo);
+                Finish(page, lsn, stampInvalid: redo);
+                if (torn)
+                {
+                    var used = U32(page.Data, 0x18);
+                    var firstAttribute = U16(page.Data, 0x14);
+                    if (!page.Valid || record.RecordOffset != 0 || firstAttribute < 0x20 || used < firstAttribute + 4 || data.Count < used)
+                    {
+                        throw new JournalException($"Log record {record.Lsn:X} does not supply a complete replacement for the torn file record");
+                    }
+                }
+
                 ChangedFileRecords.Add(((record.TargetVcn * _layout.BytesPerCluster) + start) / _layout.MftRecordSize);
                 return true;
             }
@@ -223,8 +257,8 @@ internal sealed class NtfsLogReplayer
                     return false;
                 }
 
-                var page = _pages.GetLogical(PageKind.IndexBuffer, lcns, start, length);
-                if (!PageNeedsAction(page, record, op, redo))
+                var page = _pages.GetLogical(PageKind.IndexBuffer, lcns, start, length, undoTransaction);
+                if (!PageNeedsAction(page, record, redo))
                 {
                     return false;
                 }
@@ -234,20 +268,22 @@ internal sealed class NtfsLogReplayer
                     throw new JournalException($"Log record {record.Lsn:X} changes an index buffer at cluster {lcns[start / _pages.ClusterSize]}, which is damaged");
                 }
 
+                var lsn = redo ? record.Lsn : page.Lsn;
                 NtfsLogActions.ApplyToIndexBuffer(op, record, page.Data, data);
-                Finish(page, record, redo);
+                Finish(page, lsn, stampInvalid: redo);
                 return true;
             }
 
             case NtfsLogTarget.NonResident:
-                return ApplyNonResident(record, op, data, lcns, start);
+                return ApplyNonResident(record, op, data, lcns, start, redo, undoTransaction);
 
             default:
                 throw NtfsLogActions.Unsupported(op, record);
         }
     }
 
-    private bool ApplyNonResident(NtfsLogRecord record, NtfsLogOperation op, ArraySegment<byte> data, long[] lcns, int start)
+    private bool ApplyNonResident(NtfsLogRecord record, NtfsLogOperation op, ArraySegment<byte> data, long[] lcns, int start,
+        bool redo, uint undoTransaction)
     {
         if (!_analysis.OpenAttributes.TryGetValue(record.TargetAttribute, out var attribute))
         {
@@ -265,15 +301,32 @@ internal sealed class NtfsLogReplayer
                     return false;
                 }
 
-                var page = _pages.GetLogical(PageKind.IndexBuffer, lcns, start, length);
+                var page = _pages.GetLogical(PageKind.IndexBuffer, lcns, start, length, undoTransaction);
                 if (record.RecordOffset + data.Count > length)
                 {
                     throw new JournalException($"Log record {record.Lsn:X} writes past its index buffer");
                 }
 
+                if ((page.Signature == SignatureIndx || page.Signature == SignatureBaad || page.Signature == SignatureHole) &&
+                    !PageNeedsAction(page, record, redo))
+                {
+                    return false;
+                }
+
+                var torn = !page.Valid && page.Signature == SignatureIndx;
+                if (torn && (record.RecordOffset != 0 || data.Count != length))
+                {
+                    throw new JournalException($"Log record {record.Lsn:X} only partially replaces a torn index buffer");
+                }
+
+                var lsn = redo ? record.Lsn : page.Lsn;
                 Array.Copy(data.Array, data.Offset, page.Data, record.RecordOffset, data.Count);
-                page.Valid = page.Signature == SignatureIndx && HasFixupLayout(page.Data, 0, page.Data.Length);
-                page.Dirty = true;
+                Finish(page, lsn, stampInvalid: false);
+                if (torn && !page.Valid)
+                {
+                    throw new JournalException($"Log record {record.Lsn:X} supplies an invalid replacement for the torn index buffer");
+                }
+
                 return true;
             }
 
@@ -288,8 +341,7 @@ internal sealed class NtfsLogReplayer
                 return false;
             }
 
-            var current = new byte[data.Count];
-            _pages.ReadRaw(lcns, offset, current, 0, current.Length);
+            var current = _pages.ReadRaw(lcns, offset, data.Count, undoTransaction);
             if (current.AsSpan().SequenceEqual(data.AsSpan()))
             {
                 return false;
@@ -314,13 +366,17 @@ internal sealed class NtfsLogReplayer
             return false;
         }
 
+        if (bits > int.MaxValue - (firstBit & 7))
+        {
+            throw new JournalException($"Log record {record.Lsn:X} has an oversized bit range");
+        }
+
         if (!Allocated(lcns, byteStart, byteCount))
         {
             return false;
         }
 
-        var bytes = new byte[byteCount];
-        _pages.ReadRaw(lcns, byteStart, bytes, 0, byteCount);
+        var bytes = _pages.ReadRaw(lcns, byteStart, byteCount, undoTransaction);
         var before = (byte[])bytes.Clone();
         NtfsLogActions.ChangeBits(bytes, (int)(firstBit & 7), (int)bits, op == NtfsLogOperation.SetBitsInNonresidentBitMap);
         if (before.AsSpan().SequenceEqual(bytes))
@@ -333,10 +389,10 @@ internal sealed class NtfsLogReplayer
     }
 
     /// <summary>
-    /// Whether a file record or index buffer needs the action: redo only when the page is older than the record;
-    /// undo unless this replay already undid it (the stamp is past the end of the log).
+    /// Redo checks the page LSN. Undo checks that the page history is plausible, then follows the chain without
+    /// using a page stamp as an undo cursor. More than one inverse operation can target the same page.
     /// </summary>
-    private bool PageNeedsAction(LogicalPage page, NtfsLogRecord record, NtfsLogOperation op, bool redo)
+    private bool PageNeedsAction(LogicalPage page, NtfsLogRecord record, bool redo)
     {
         if (page.Signature == SignatureBaad)
         {
@@ -354,26 +410,30 @@ internal sealed class NtfsLogReplayer
             return true;
         }
 
-        // Otherwise the LSN is at offset 8, also in a record that was never written (0): Windows checks it there.
-        return redo ? page.Lsn < record.Lsn : page.Lsn < _undoStamp;
+        if (redo)
+        {
+            return page.Lsn < record.Lsn;
+        }
+
+        if (page.Valid && (page.Lsn < record.Lsn || page.Lsn > _analysis.LastLsn))
+        {
+            throw new JournalException($"Page LSN {page.Lsn:X} cannot establish the undo history for record {record.Lsn:X}");
+        }
+
+        return true;
     }
 
-    private void Finish(LogicalPage page, NtfsLogRecord record, bool redo)
+    private static void Finish(LogicalPage page, ulong lsn, bool stampInvalid)
     {
         // An undo can turn a page back into "never written" (no signature); it is then written as it is.
         var expected = page.Kind == PageKind.FileRecord ? SignatureFile : SignatureIndx;
         page.Valid = page.Signature == expected && HasFixupLayout(page.Data, 0, page.Data.Length);
         page.Dirty = true;
 
-        // Redo stamps the record's LSN, as Windows does even in a page that is not a valid record yet (it is then
-        // written without an update sequence array). Undo stamps only real records.
-        if (redo)
+        // In-memory undo retains the page's historical LSN. It does not create a new log record.
+        if (stampInvalid || page.Valid)
         {
-            page.Lsn = record.Lsn;
-        }
-        else if (page.Valid)
-        {
-            page.Lsn = _undoStamp;
+            page.Lsn = lsn;
         }
     }
 
@@ -381,6 +441,11 @@ internal sealed class NtfsLogReplayer
     {
         if (_analysis.OpenAttributes.TryGetValue(record.TargetAttribute, out var attribute) && attribute.BytesPerIndexBuffer != 0)
         {
+            if (!JournalVolumeLayout.IsRecordSize(attribute.BytesPerIndexBuffer))
+            {
+                throw new JournalException($"Log record {record.Lsn:X} has an invalid index buffer size");
+            }
+
             return (int)attribute.BytesPerIndexBuffer;
         }
 
@@ -394,8 +459,8 @@ internal sealed class NtfsLogReplayer
     private bool Allocated(long[] lcns, int start, int length)
     {
         var first = start / _pages.ClusterSize;
-        var last = (start + length - 1) / _pages.ClusterSize;
-        if (last >= lcns.Length)
+        var last = (start + (long)length - 1) / _pages.ClusterSize;
+        if (start < 0 || length <= 0 || last >= lcns.Length)
         {
             throw new JournalException("A log record addresses bytes beyond the clusters it names");
         }

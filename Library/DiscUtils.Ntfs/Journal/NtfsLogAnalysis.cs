@@ -29,9 +29,9 @@ using static DiscUtils.Ntfs.Journal.JournalUtilities;
 namespace DiscUtils.Ntfs.Journal;
 
 /// <summary>
-/// The analysis pass of NTFS recovery: starting from the tables of the last checkpoint, it reads every record
-/// after the checkpoint and works out which pages may be stale on disk (the dirty page table) and which
-/// transactions were not finished (the transaction table).
+/// The analysis pass of NTFS recovery: starting from the tables of the last checkpoint, it reads the active NTFS
+/// client's records after the checkpoint and works out which pages may be stale on disk (the dirty page table)
+/// and which transactions were not finished (the transaction table).
 /// </summary>
 internal sealed class NtfsLogAnalysis
 {
@@ -68,11 +68,13 @@ internal sealed class NtfsLogAnalysis
     public IEnumerable<KeyValuePair<uint, TransactionEntry>> Losers =>
         Transactions.Where(t => t.Value.State == TransactionState.Active && t.Value.UndoNextLsn != 0);
 
-    /// <summary>Analyzes the log of <paramref name="client"/> (NTFS, the client in use) from its last checkpoint.</summary>
-    public static NtfsLogAnalysis Run(LfsLog log, LfsClient client, JournalVolumeLayout layout)
+    /// <summary>Analyzes the active NTFS client's log from its last checkpoint.</summary>
+    public static NtfsLogAnalysis Run(LfsLog log, JournalVolumeLayout layout)
     {
+        var client = log.NtfsClient;
         var restartLfs = log.ReadRecord(client.RestartLsn)
                          ?? throw new JournalException($"The NTFS restart record at {client.RestartLsn:X} is not in the log");
+        log.RequireNtfsRecord(restartLfs, "NTFS restart record");
         var analysis = new NtfsLogAnalysis(log, NtfsRestartRecord.Parse(restartLfs));
         analysis.LoadCheckpointTables(layout);
         analysis.ReadAfterCheckpoint();
@@ -113,12 +115,13 @@ internal sealed class NtfsLogAnalysis
 
     private byte[] ReadTableDump(ulong lsn, int length, string name)
     {
-        if (lsn == 0 || length == 0)
+        if (length == 0)
         {
             return null;
         }
 
         var lfs = Log.ReadRecord(lsn) ?? throw new JournalException($"The {name} dump at {lsn:X} is not in the log");
+        Log.RequireNtfsRecord(lfs, $"{name} dump", LfsRecord.TypeClientRecord);
         var record = NtfsLogRecord.TryParse(lfs, out var error) ?? throw new JournalException(error);
         var data = record.RedoData;
         if (data.Count < length)
@@ -175,7 +178,9 @@ internal sealed class NtfsLogAnalysis
                     first = false;
                 }
 
-                DirtyPages.Add(DirtyPageEntry.Parse(dirtyPages, offset, size, version));
+                var page = DirtyPageEntry.Parse(dirtyPages, offset, size, version);
+                CheckHistoryRecord(page.OldestLsn, "dirty page's oldest record");
+                DirtyPages.Add(page);
             }
 
             if (first && dirtyPages.Length >= 2)
@@ -187,9 +192,23 @@ internal sealed class NtfsLogAnalysis
         var transactions = ReadTableDump(r.TransactionTableLsn, r.TransactionTableLength, "transaction table");
         if (transactions != null)
         {
-            foreach (var (offset, _) in RestartTable.Entries(transactions))
+            foreach (var (offset, size) in RestartTable.Entries(transactions))
             {
-                Transactions[(uint)offset] = TransactionEntry.Parse(transactions, offset);
+                if (size < TransactionEntry.Size)
+                {
+                    throw new JournalException("A transaction table entry is too short");
+                }
+
+                var transaction = TransactionEntry.Parse(transactions, offset);
+                if (transaction.State is not (TransactionState.Active or TransactionState.Prepared or TransactionState.Committed))
+                {
+                    throw new JournalException($"Transaction {offset:X} has an invalid checkpoint state ({transaction.State})");
+                }
+
+                CheckHistoryRecord(transaction.FirstLsn, "transaction's first record");
+                CheckHistoryRecord(transaction.PreviousLsn, "transaction's previous record");
+                CheckHistoryRecord(transaction.UndoNextLsn, "transaction's next undo record");
+                Transactions[(uint)offset] = transaction;
             }
         }
 
@@ -199,22 +218,39 @@ internal sealed class NtfsLogAnalysis
         }
     }
 
+    private void CheckHistoryRecord(ulong lsn, string role)
+    {
+        // Check retained history here. Redo and undo still decide which records must be present to recover.
+        if (Log.ReadRecord(lsn, readClientData: false) is { } record)
+        {
+            Log.RequireNtfsRecord(record, role, LfsRecord.TypeClientRecord);
+        }
+    }
+
     private void ReadAfterCheckpoint()
     {
         var checkpoint = RestartRecord.CheckpointLsn;
         ulong firstAfterCheckpoint = 0;
-        LastLsn = checkpoint;
         foreach (var lfs in Log.ReadForward(checkpoint))
         {
+            // The end of the shared LFS log is used for the restart pages and as an upper bound for page LSNs.
             LastLsn = lfs.Lsn;
-            if (lfs.Lsn == checkpoint)
+            var afterCheckpoint = lfs.Lsn != checkpoint;
+            if (afterCheckpoint)
             {
-                // Analysis starts with the record after the checkpoint.
+                RecordsAfterCheckpoint++;
+            }
+            else
+            {
+                Log.RequireNtfsRecord(lfs, "checkpoint record");
+            }
+
+            if (!Log.IsForNtfsClient(lfs))
+            {
                 continue;
             }
 
-            RecordsAfterCheckpoint++;
-            if (firstAfterCheckpoint == 0)
+            if (afterCheckpoint && firstAfterCheckpoint == 0)
             {
                 firstAfterCheckpoint = lfs.Lsn;
             }
@@ -225,10 +261,13 @@ internal sealed class NtfsLogAnalysis
             }
 
             var record = NtfsLogRecord.TryParse(lfs, out var error) ?? throw new JournalException(error);
-            Analyze(record);
+            if (afterCheckpoint)
+            {
+                Analyze(record);
+            }
         }
 
-        if (LastLsn == checkpoint && Log.ReadRecord(checkpoint) == null)
+        if (LastLsn == 0)
         {
             throw new JournalException($"The checkpoint record {checkpoint:X} is not in the log");
         }
@@ -242,8 +281,14 @@ internal sealed class NtfsLogAnalysis
             }
         }
 
-        foreach (var transaction in Transactions.Values)
+        foreach (var entry in Transactions)
         {
+            var transaction = entry.Value;
+            if (transaction.State == TransactionState.Prepared)
+            {
+                throw new JournalException($"Prepared transaction {entry.Key:X} has no recorded outcome");
+            }
+
             if (transaction.FirstLsn != 0 && (redo == 0 || transaction.FirstLsn < redo))
             {
                 redo = transaction.FirstLsn;
@@ -313,8 +358,12 @@ internal sealed class NtfsLogAnalysis
             return;
         }
 
-        // Every record that changes a page (also one DiscUtils cannot apply: the redo pass refuses it then) marks
-        // that page dirty from this LSN on, with the clusters the record names.
+        if (record.TargetVcn < 0 || record.TargetVcn > long.MaxValue - ClustersPerPage)
+        {
+            throw new JournalException($"Log record {record.Lsn:X} has an invalid target VCN");
+        }
+
+        // Every record that changes a page marks that page dirty from this LSN on, with the clusters it names.
         var page = FindDirtyPage(record.TargetAttribute, record.TargetVcn);
         if (page == null)
         {
@@ -344,6 +393,11 @@ internal sealed class NtfsLogAnalysis
         {
             var lcn = (long)U64(data.Array, data.Offset + i);
             var length = (long)U64(data.Array, data.Offset + i + 8);
+            if (lcn < 0 || length < 0 || length > long.MaxValue - lcn)
+            {
+                throw new JournalException($"Log record {record.Lsn:X} has an invalid range of freed clusters");
+            }
+
             foreach (var page in DirtyPages)
             {
                 for (var j = 0; j < page.Lcns.Length; j++)

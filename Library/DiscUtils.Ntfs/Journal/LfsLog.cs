@@ -28,7 +28,7 @@ using static DiscUtils.Ntfs.Journal.JournalUtilities;
 namespace DiscUtils.Ntfs.Journal;
 
 /// <summary>
-/// A client of the log (NTFS is the only one) as listed in the restart area.
+/// A client of the log as listed in the restart area.
 /// </summary>
 internal sealed class LfsClient
 {
@@ -96,7 +96,75 @@ internal sealed class LfsRestartPage
 
     public bool IsClean => (Flags & FlagCleanDismount) != 0;
 
-    public LfsClient InUseClient => InUseClientList == NoClient ? null : Clients[InUseClientList];
+    public bool RequiresRecovery => !IsClean && InUseClientList != NoClient;
+
+    public ushort FindNtfsClientIndex()
+    {
+        var visited = new bool[Clients.Count];
+        var ntfsIndex = NoClient;
+        ValidateList(InUseClientList, inUse: true);
+        ValidateList(FreeClientList, inUse: false);
+        if (ntfsIndex == NoClient)
+        {
+            throw new JournalException("$LogFile has no NTFS client in use");
+        }
+
+        return ntfsIndex;
+
+        void ValidateList(ushort head, bool inUse)
+        {
+            var previous = NoClient;
+            for (var index = head; index != NoClient; index = Clients[index].NextClient)
+            {
+                if (index >= Clients.Count || visited[index] || Clients[index].PreviousClient != previous)
+                {
+                    throw new JournalException("$LogFile has an invalid LFS client list");
+                }
+
+                visited[index] = true;
+                previous = index;
+                if (inUse && string.Equals(Clients[index].Name, "NTFS", StringComparison.Ordinal))
+                {
+                    if (ntfsIndex != NoClient)
+                    {
+                        throw new JournalException("$LogFile has more than one NTFS client in use");
+                    }
+
+                    ntfsIndex = index;
+                }
+            }
+        }
+    }
+
+    /// <summary>Builds the logical image of the clean LFS 1.1 restart page used by DiscUtils.</summary>
+    public byte[] CreateResetImage(ulong lastLsn)
+    {
+        var page = (byte[])Page.Clone();
+        var ra = RestartAreaOffset;
+        Put16(page, 0x1A, 1);
+        Put16(page, 0x1C, 1);
+        Put64(page, ra, Math.Max(lastLsn, CurrentLsn));
+        Put16(page, ra + 0x0A, 0);
+        Put16(page, ra + 0x0C, NoClient);
+        Put16(page, ra + 0x0E, FlagCleanDismount);
+        Put32(page, ra + 0x28, OpenLogCount + 1);
+        return page;
+    }
+
+    public bool MatchesResetOf(LfsRestartPage source)
+    {
+        if (!IsClean || InUseClientList != NoClient || MajorVersion != 1 || MinorVersion != 1 ||
+            CurrentLsn < source.CurrentLsn || OpenLogCount != source.OpenLogCount + 1 || Page.Length != source.Page.Length)
+        {
+            return false;
+        }
+
+        var expected = source.CreateResetImage(CurrentLsn);
+        var usa = U16(expected, 4);
+        var usaEnd = usa + 2 * U16(expected, 6);
+        return expected.AsSpan(0, usa).SequenceEqual(Page.AsSpan(0, usa)) &&
+               expected.AsSpan(usaEnd).SequenceEqual(Page.AsSpan(usaEnd));
+    }
 
     /// <summary>
     /// Reads a restart page at <paramref name="offset"/>; <c>null</c> if there is none or it is damaged.
@@ -104,6 +172,11 @@ internal sealed class LfsRestartPage
     public static LfsRestartPage TryRead(LogFileStorage storage, long offset)
     {
         var head = new byte[512];
+        if (offset > storage.Length - head.Length)
+        {
+            return null;
+        }
+
         storage.Read(offset, head, 0, head.Length);
         var signature = U32(head, 0);
         if (signature != SignatureRstr && signature != SignatureChkd)
@@ -113,7 +186,8 @@ internal sealed class LfsRestartPage
 
         var systemPageSize = (int)U32(head, 0x10);
         var logPageSize = (int)U32(head, 0x14);
-        if (!IsPageSize(systemPageSize) || !IsPageSize(logPageSize) || offset + systemPageSize > storage.Length)
+        if (!IsPageSize(systemPageSize) || !IsPageSize(logPageSize) ||
+            (offset != 0 && offset != systemPageSize) || offset > storage.Length - systemPageSize)
         {
             return null;
         }
@@ -138,7 +212,7 @@ internal sealed class LfsRestartPage
         };
 
         var ra = result.RestartAreaOffset;
-        if ((ra & 7) != 0 || ra < 0x1E || ra + 0x30 > systemPageSize)
+        if ((ra & 7) != 0 || ra < 0x1E || ra < U16(page, 4) + 2 * U16(page, 6) || ra + 0x30 > systemPageSize)
         {
             return null;
         }
@@ -156,7 +230,8 @@ internal sealed class LfsRestartPage
         result.OpenLogCount = U32(page, ra + 0x28);
 
         var clients = ra + result.ClientArrayOffset;
-        if (result.LogClients == 0 || result.LogClients > 64 || clients + (result.LogClients * 0xA0) > systemPageSize)
+        if (result.LogClients == 0 || result.LogClients > 64 || result.ClientArrayOffset < 0x2C ||
+            clients + (result.LogClients * 0xA0) > systemPageSize)
         {
             return null;
         }
@@ -225,14 +300,20 @@ internal sealed class LfsRecord
 /// </remarks>
 internal sealed class LfsLog
 {
+    // The NTFS client uses 16-bit counts for the LCN array and 16-bit offsets and lengths for operation data.
+    private const int MaxClientDataLength = NtfsLogRecord.HeaderLength + 8 * ushort.MaxValue;
+
     private readonly LogFileStorage _storage;
+    private readonly ushort _ntfsClientIndex;
     private readonly Dictionary<long, byte[]> _pages = [];
     private readonly Dictionary<long, List<byte[]>> _tailCopies = [];
 
-    private LfsLog(LogFileStorage storage, LfsRestartPage restart)
+    private LfsLog(LogFileStorage storage, LfsRestartPage restart, LfsRestartPage publishedReset, ushort ntfsClientIndex)
     {
         _storage = storage;
+        _ntfsClientIndex = ntfsClientIndex;
         Restart = restart;
+        PublishedReset = publishedReset;
         PageSize = restart.LogPageSize;
         SequenceNumberBits = restart.SequenceNumberBits;
         FileSize = restart.FileSize;
@@ -244,8 +325,13 @@ internal sealed class LfsLog
 
     public LogFileStorage Storage => _storage;
 
-    /// <summary>The restart page in use (the valid copy with the highest current LSN).</summary>
+    /// <summary>The restart page used for analysis.</summary>
     public LfsRestartPage Restart { get; }
+
+    public LfsClient NtfsClient => _ntfsClientIndex == LfsRestartPage.NoClient ? null : Restart.Clients[_ntfsClientIndex];
+
+    /// <summary>A clean reset image whose sibling is still the source of that reset.</summary>
+    public LfsRestartPage PublishedReset { get; }
 
     public int PageSize { get; }
 
@@ -314,22 +400,83 @@ internal sealed class LfsLog
         }
 
         var restart = first == null || (second != null && second.CurrentLsn > first.CurrentLsn) ? second : first;
+        LfsRestartPage publishedReset = null;
+        if (first != null && second != null && first.RequiresRecovery != second.RequiresRecovery)
+        {
+            var dirty = first.RequiresRecovery ? first : second;
+            var clean = first.RequiresRecovery ? second : first;
+            if (clean.MatchesResetOf(dirty))
+            {
+                // Finish an interrupted DiscUtils reset only after rechecking the metadata against the old log.
+                restart = dirty;
+                publishedReset = clean;
+            }
+            else if (first.CurrentLsn == second.CurrentLsn)
+            {
+                throw new JournalException("The $LogFile restart pages disagree about recovery at the same LSN");
+            }
+        }
         if (restart.MajorVersion is not (1 or 2))
         {
             throw new JournalException(
                 $"$LogFile uses log file service version {restart.MajorVersion}.{restart.MinorVersion}, which DiscUtils does not support");
         }
 
+        var minLogPages = restart.MajorVersion >= 2 ? 0x23L : 8L;
         if (restart.SequenceNumberBits is < 16 or > 60 || restart.FileSize > storage.Length ||
-            restart.FileSize < 8L * restart.LogPageSize || (restart.FileSize & (restart.LogPageSize - 1)) != 0 ||
-            restart.RecordHeaderLength != 0x30 ||
-            restart.LogPageDataOffset < 0x28 || restart.LogPageDataOffset >= restart.LogPageSize)
+            restart.FileSize < minLogPages * restart.LogPageSize || restart.FileSize < 2L * restart.SystemPageSize ||
+            restart.FileSize > (1L << (67 - restart.SequenceNumberBits)) || (restart.FileSize & (restart.LogPageSize - 1)) != 0 ||
+            restart.RecordHeaderLength != 0x30 || restart.LogPageDataOffset < 0x28 ||
+            restart.LogPageDataOffset > restart.LogPageSize - restart.RecordHeaderLength || (restart.LogPageDataOffset & 7) != 0)
         {
             throw new JournalException("$LogFile has an implausible restart area");
         }
 
+        var ntfsClientIndex = LfsRestartPage.NoClient;
+        if (restart.RequiresRecovery)
+        {
+            ntfsClientIndex = restart.FindNtfsClientIndex();
+            var other = restart == first ? second : first;
+            if (other?.RequiresRecovery == true && restart.CurrentLsn == other.CurrentLsn)
+            {
+                var otherIndex = other.FindNtfsClientIndex();
+                var client = restart.Clients[ntfsClientIndex];
+                var otherClient = other.Clients[otherIndex];
+                if (restart.LogClients != other.LogClients || restart.InUseClientList != other.InUseClientList ||
+                    ntfsClientIndex != otherIndex || client.SequenceNumber != otherClient.SequenceNumber ||
+                    client.RestartLsn != otherClient.RestartLsn || client.OldestLsn != otherClient.OldestLsn)
+                {
+                    throw new JournalException("The $LogFile restart pages disagree about the checkpoint at the same LSN");
+                }
+            }
+        }
+
         kind = Kind.Log;
-        return new LfsLog(storage, restart);
+        return new LfsLog(storage, restart, publishedReset, ntfsClientIndex);
+    }
+
+    public bool IsForNtfsClient(LfsRecord record)
+    {
+        if (record.ClientIndex >= Restart.LogClients)
+        {
+            throw new JournalException($"Log record {record.Lsn:X} has client index {record.ClientIndex} outside the restart client array");
+        }
+
+        return record.ClientIndex == _ntfsClientIndex && record.ClientSequenceNumber == NtfsClient.SequenceNumber;
+    }
+
+    public void RequireNtfsRecord(LfsRecord record, string role, uint? expectedType = null)
+    {
+        if (!IsForNtfsClient(record))
+        {
+            throw new JournalException($"The {role} at {record.Lsn:X} does not belong to the active NTFS client");
+        }
+
+        if (record.RecordType is not (LfsRecord.TypeClientRecord or LfsRecord.TypeClientRestart) ||
+            (expectedType.HasValue && record.RecordType != expectedType.Value))
+        {
+            throw new JournalException($"The {role} at {record.Lsn:X} has the wrong LFS record type");
+        }
     }
 
     public long LsnToOffset(ulong lsn) => (long)((lsn << SequenceNumberBits) >> (SequenceNumberBits - 3));
@@ -340,8 +487,9 @@ internal sealed class LfsLog
 
     /// <summary>
     /// Reads the record with this LSN; <c>null</c> if the log holds no such record (the end of the log).
+    /// Set <paramref name="readClientData"/> to false to check the identity of a retained header alone.
     /// </summary>
-    public LfsRecord ReadRecord(ulong lsn)
+    public LfsRecord ReadRecord(ulong lsn, bool readClientData = true)
     {
         if (lsn == 0)
         {
@@ -362,12 +510,6 @@ internal sealed class LfsLog
             return null;
         }
 
-        var dataLength = (int)U32(page, inPage + 0x18);
-        if (dataLength < 0 || dataLength > FileSize)
-        {
-            return null;
-        }
-
         var record = new LfsRecord
         {
             Lsn = lsn,
@@ -378,13 +520,26 @@ internal sealed class LfsLog
             RecordType = U32(page, inPage + 0x20),
             TransactionId = U32(page, inPage + 0x24),
             Flags = U16(page, inPage + 0x28),
-            ClientData = new byte[dataLength],
         };
 
-        var copied = Math.Min(dataLength, PageSize - (inPage + RecordHeaderLength));
+        if (!readClientData)
+        {
+            return record;
+        }
+
+        var dataLength = U32(page, inPage + 0x18);
+        var firstPageCapacity = PageSize - (inPage + RecordHeaderLength);
+        var continuationPages = (FileSize - FirstPageOffset) / PageSize - 1;
+        if (dataLength > MaxClientDataLength || dataLength > firstPageCapacity + continuationPages * (PageSize - DataOffset))
+        {
+            throw new JournalException($"Log record {lsn:X} has an invalid client data length");
+        }
+
+        record.ClientData = new byte[(int)dataLength];
+        var copied = Math.Min(record.ClientData.Length, firstPageCapacity);
         Array.Copy(page, inPage + RecordHeaderLength, record.ClientData, 0, copied);
         var current = pageOffset;
-        while (copied < dataLength)
+        while (copied < record.ClientData.Length)
         {
             current = NextPageOffset(current, out _);
             var next = GetPage(current, lsn);
@@ -393,7 +548,7 @@ internal sealed class LfsLog
                 return null;
             }
 
-            var chunk = Math.Min(dataLength - copied, PageSize - DataOffset);
+            var chunk = Math.Min(record.ClientData.Length - copied, PageSize - DataOffset);
             Array.Copy(next, DataOffset, record.ClientData, copied, chunk);
             copied += chunk;
         }
@@ -462,7 +617,13 @@ internal sealed class LfsLog
         while (record != null)
         {
             yield return record;
-            record = ReadRecord(NextLsn(record));
+            var next = NextLsn(record);
+            if (next <= record.Lsn)
+            {
+                throw new JournalException($"The next LSN after {record.Lsn:X} overflows the log sequence");
+            }
+
+            record = ReadRecord(next);
         }
     }
 
